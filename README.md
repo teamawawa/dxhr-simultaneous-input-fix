@@ -1,12 +1,5 @@
 # DXHR:DC — simultaneous keyboard/mouse + gamepad input patch
 
-> ✻ Cooked for 14m 35s
-> ✻ Churned for 8m 45s
-> ✻ Baked for (TODO)
-> ✻ Brewed for 11m 50s
-
-FYI: this is pending further cleaning.
-
 **Deus Ex: Human Revolution — Director's Cut** (PC, Steam build) accepts one
 input device at a time. Touch the mouse and the gamepad stops responding; use the
 gamepad and the mouse stops. This patch removes that.
@@ -17,11 +10,24 @@ mapped to Mouse while the sticks and buttons handle everything else. Right-stick
 look, stick acceleration and aim assist all still work. Confirmed working
 in-game.
 
+Claude was used heavily in reverse engineering and developing the patch,
+though the decomp by rrika helped a bunch. The whole process didn't take very long:
+
+> ✻ Cooked for 14m 35s
+> ✻ Churned for 8m 45s
+> ✻ Baked for 8m 01s
+> ✻ Brewed for 11m 50s
+
+(and then quite a bit more as I got the java patcher to look the way I want)
+
 ---
 
 ## Mod download
 
 See here: https://www.nexusmods.com/deusexhumanrevolution/mods/73
+
+If you're an end user, this is what you should use. This repo is for others
+who want to understand this patch or include it within their modpacks.
 
 ---
 
@@ -88,6 +94,22 @@ aim-assist gating. Leaving them off keeps that behaviour stock.
 acceleration and aim assist. It is the fallback if `looksrc` misbehaves.
 
 [FINDINGS.md](FINDINGS.md) has the full reverse-engineering write-up.
+
+## Manual patching with python script
+
+```sh
+python3 tools/patch_simultaneous_input.py "/path/to/DXHRDC.exe"
+
+python3 tools/patch_simultaneous_input.py --check  <exe>    # report status, write nothing
+python3 tools/patch_simultaneous_input.py --revert <exe>    # undo everything
+
+# The following are for alternate patches, not meant to be used
+python3 tools/patch_simultaneous_input.py --force-mouse-look <exe>
+python3 tools/patch_simultaneous_input.py --no-looksrc       <exe>
+python3 tools/patch_simultaneous_input.py --mousethresh      <exe>
+python3 tools/patch_simultaneous_input.py --padthresh        <exe>
+python3 tools/patch_simultaneous_input.py --no-rumble        <exe>
+```
 
 ---
 
