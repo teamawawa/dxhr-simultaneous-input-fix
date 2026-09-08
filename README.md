@@ -13,10 +13,10 @@ in-game.
 Claude was used heavily in reverse engineering and developing the patch,
 though the decomp by rrika helped a bunch. The whole process didn't take very long:
 
-> ✻ Cooked for 14m 35s
-> ✻ Churned for 8m 45s
-> ✻ Baked for 8m 01s
-> ✻ Brewed for 11m 50s
+> ✻ Cooked for 14m 35s<br>
+> ✻ Churned for 8m 45s<br>
+> ✻ Baked for 8m 01s<br>
+> ✻ Brewed for 11m 50s<br>
 
 (and then quite a bit more as I got the java patcher to look the way I want)
 
