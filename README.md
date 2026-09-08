@@ -1,0 +1,96 @@
+# DXHR:DC — simultaneous keyboard/mouse + gamepad input patch
+
+> ✻ Cooked for 14m 35s
+> ✻ Churned for 8m 45s
+> ✻ Baked for (TODO)
+> ✻ Brewed for 11m 50s
+
+FYI: this is pending further cleaning.
+
+**Deus Ex: Human Revolution — Director's Cut** (PC, Steam build) accepts one
+input device at a time. Touch the mouse and the gamepad stops responding; use the
+gamepad and the mouse stops. This patch removes that.
+
+Both devices stay live, and aiming follows whichever one you are actually moving,
+decided per frame. It was built for aiming with a Steam Controller touchpad
+mapped to Mouse while the sticks and buttons handle everything else. Right-stick
+look, stick acceleration and aim assist all still work. Confirmed working
+in-game.
+
+---
+
+## Mod download
+
+See here: https://www.nexusmods.com/deusexhumanrevolution/mods/73
+
+---
+
+## Mechanism
+
+The engine keeps one global byte, `g_usingMouseKeyboard` (`0x00B23E54`),
+re-arbitrated every frame: mouse/keyboard activity sets it to 1, gamepad activity
+sets it to 0. Two mechanisms read it.
+
+**Both input producers skip their entire state-filling code** when the byte names
+the other device. That is what kills the pad the instant you touch the mouse.
+Removing those two gates covers buttons, movement and axes, which all land in the
+same summed `InputState`.
+
+**The look/aim update branches on the same byte**, and its two arms read
+different values. The mouse arm applies the raw mouse delta; the gamepad arm runs
+stick acceleration and aim assist. They compute different things and cannot both
+run, so looking has to pick one source per frame.
+
+The byte is unreliable for that choice. It comes from coarse latch-based activity
+detectors, and in practice it does not track the mouse while a pad is also in
+use: move with the left stick or hold a trigger and mouse aiming dies. So
+`looksrc` ignores it and asks the direct question instead.
+
+```
+g_inputSystems[0]->currentState->{deltaX, deltaY} != 0  ?  mouse arm : gamepad arm
+```
+
+Only `cdc::PCMouseKeyboard` writes those two floats, so this is an unambiguous
+"did the mouse move this frame". A 40-byte thunk goes into `.text` padding and is
+called in place of the `cmp`. It returns with `ZF` set so the original `je` still
+does the branching, and clobbers nothing but flags.
+
+| name | site | VA | file offset | vanilla | patched |
+|---|------|----|-------------|---------|---------|
+| `kbm` | `cdc::PCMouseKeyboard::update` gate | `0x004B116F` | `0x0B056F` | `0F 84 23 10 00 00` (`je`) | `90 ×6` |
+| `pad` | `cdc::PCXInputProducer::update` gate | `0x004B35B7` | `0x0B29B7` | `0F 85 1C 03 00 00` (`jne`) | `90 ×6` |
+| `looksrc` | look/aim source select | `0x007AD162` | `0x3AC562` | `80 3D … 00` (`cmp`) | `E8 rel32` + `90 90` |
+| `looksrc` | injected thunk | `0x00844234` | `0x443634` | `CC ×40` | 40-byte thunk |
+| `rumble` | `cdc::PCXInputProducer::setVibration` gate | `0x004B332A` | `0x0B272A` | `74 0B` (`je`) | `EB 0B` (`jmp`) |
+
+The thunk is position-independent: `call`/`pop` gets EIP, then an EIP-relative
+displacement reaches `g_inputSystems`. It needs no new base relocation and works
+with the ASLR the image asks for. Its code cave is verified unreferenced before
+use, and `--revert` restores it to `0xCC`.
+
+`cdc::InputSystem::CombineInputs` already sums the states of all registered
+producers, and the two producers write to disjoint slots of the shared
+`InputState`, so nothing else has to change.
+
+### Optional sites
+
+All three are off by default.
+
+| name | change | effect |
+|---|------|--------|
+| `mousethresh` | mouse activity threshold `5` → `0` | widens the detector feeding `g_usingMouseKeyboard` |
+| `padthresh` | thumbstick idle window `±0x3FFF` → `±0x1FFF` | same, for the pad |
+| `look` | NOP the look/aim `je` at `0x007AD169` | aiming always uses the mouse arm |
+
+The two threshold sites only affect the flag, which drives button prompts and
+aim-assist gating. Leaving them off keeps that behaviour stock.
+`--force-mouse-look` guarantees mouse aiming but disables right-stick look, stick
+acceleration and aim assist. It is the fallback if `looksrc` misbehaves.
+
+[FINDINGS.md](FINDINGS.md) has the full reverse-engineering write-up.
+
+---
+
+## Thanks
+
+Big thanks to [rrika/cdcEngineDXHR](https://github.com/rrika/cdcEngineDXHR).
