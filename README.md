@@ -18,16 +18,20 @@ though the decomp by rrika helped a bunch. The whole process didn't take very lo
 > ✻ Baked for 8m 01s<br>
 > ✻ Brewed for 11m 50s<br>
 
-(and then quite a bit more as I got the java patcher to look the way I want)
+(and then the mod was working but I spent quite a bit more to get the java patcher looking the way I want)
 
 ---
 
-## Mod download
+## Mod download & Installation
 
 See here: https://www.nexusmods.com/deusexhumanrevolution/mods/73
 
 If you're an end user, this is what you should use. This repo is for others
 who want to understand this patch or include it within their modpacks.
+
+If you don't want to use nexusmods (understandable), you can also download
+directly from github [here](https://github.com/teamawawa/dxhr-simultaneous-input-fix/releases/latest),
+same description is also visible there.
 
 ---
 
