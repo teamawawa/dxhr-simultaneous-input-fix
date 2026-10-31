@@ -121,6 +121,38 @@ def make_maps(data):
     return base, va2off, off2va, text
 
 
+IMAGE_REL_BASED_ABSOLUTE = 0    # padding entry; the loader skips it
+IMAGE_REL_BASED_HIGHLOW = 3     # add the rebase delta to the dword at this RVA
+
+
+def base_relocs(data):
+    """Every base relocation entry as (rva, type, file offset of its 16-bit word).
+
+    The exe sets DYNAMIC_BASE, so on Windows it is loaded at a randomised base and
+    the loader adds the slide to every HIGHLOW dword listed here. Wine loads it at
+    the preferred base and applies none of them, so a patch that writes over a live
+    fixup works under Wine and is corrupted on Windows.
+    """
+    pe_off = struct.unpack_from("<I", data, 0x3C)[0]
+    opt = pe_off + 24
+    rva, size = struct.unpack_from("<II", data, opt + 96 + 5 * 8)
+    base, secs = pe_sections(data)
+    _, va2off, _, _ = make_maps(data)
+    off = va2off(base + rva)
+    if not rva or off is None:
+        return []
+    out, end = [], off + size
+    while off + 8 <= end:
+        page, block = struct.unpack_from("<II", data, off)
+        if block < 8:
+            break
+        for w in range(off + 8, off + block, 2):
+            word = struct.unpack_from("<H", data, w)[0]
+            out.append((page + (word & 0xFFF), word >> 12, w))
+        off += block
+    return out
+
+
 def find_one(data, pattern, what, start=0, end=None):
     """pattern is a regex over bytes; require exactly one match."""
     hits = [m for m in re.finditer(pattern, data[start:end], re.DOTALL)]
@@ -136,15 +168,25 @@ class Site:
         self.name, self.parts, self.desc, self.default = name, parts, desc, default
 
     def state(self, data):
+        """patched / vanilla, "partial" when every part is one or the other but they
+        disagree, UNKNOWN when any part matches neither.
+
+        "partial" is a state real installs are in: v4 shipped `looksrc` without its
+        relocation part, so an exe patched by v4 has the call and thunk but a live
+        fixup. Patching completes it and reverting undoes it; only bytes we do not
+        recognise are refused.
+        """
         seen = set()
         for off, orig, new in self.parts:
             cur = bytes(data[off:off + len(new)])
             seen.add("patched" if cur == new else "vanilla" if cur == orig else "UNKNOWN")
+        if "UNKNOWN" in seen:
+            return "UNKNOWN"
         if seen == {"patched"}:
             return "patched"
         if seen == {"vanilla"}:
             return "vanilla"
-        return "UNKNOWN"
+        return "partial"
 
     def write(self, data, patched):
         for off, orig, new in self.parts:
@@ -251,6 +293,7 @@ def find_cave(data, va2off, off2va, text, look_call_off):
 def locate_sites(data):
     base, va2off, off2va, text = make_maps(data)
     tstart, tend = text[3], text[3] + text[4]
+    relocs = base_relocs(data)
     sites = []
 
     # --- 1. the XInput "activity only" block inside PCXInputProducer::update
@@ -340,9 +383,25 @@ def locate_sites(data):
     assert len(thunk) == THUNK_LEN
     call = b"\xE8" + struct.pack("<i", cave_va - (off2va(look_off) + 5)) + b"\x90\x90"
 
+    # The cmp carries g_usingMouseKeyboard as an absolute operand at +2, so .reloc
+    # has a HIGHLOW fixup there. Left live, Windows adds its ASLR slide to the
+    # middle of our call's rel32 and the call lands in unmapped memory the first
+    # time the look update runs. Turning the entry into ABSOLUTE padding makes the
+    # loader skip it; reverting restores it.
+    fix_rva = off2va(look_off) + 2 - base
+    fix = [r for r in relocs if r[0] == fix_rva
+           and r[1] in (IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_ABSOLUTE)]
+    if len(fix) != 1:
+        raise LookupError("expected 1 relocation for the look/aim cmp operand, found %d"
+                          % len(fix))
+    fix_word_off, low12 = fix[0][2], fix_rva & 0xFFF
+    reloc_live = struct.pack("<H", (IMAGE_REL_BASED_HIGHLOW << 12) | low12)
+    reloc_dead = struct.pack("<H", (IMAGE_REL_BASED_ABSOLUTE << 12) | low12)
+
     sites.append(Site("looksrc", [
         (look_off, cmp_orig, call),
-        (cave_off, b"\xCC" * THUNK_LEN, thunk)],
+        (cave_off, b"\xCC" * THUNK_LEN, thunk),
+        (fix_word_off, reloc_live, reloc_dead)],
         "look/aim update (VA 0x%08X): pick the mouse arm when the frame's real "
         "mouse delta is non-zero, else the gamepad arm (thunk at VA 0x%08X, "
         "g_inputSystems = 0x%08X)" % (off2va(look_off), cave_va, gis_va)))
@@ -361,7 +420,36 @@ def locate_sites(data):
                       "-> rumble is not muted in keyboard/mouse mode"
                       % off2va(vib_off + 10)))
 
+    check_relocations(sites, relocs, off2va, base)
     return flag_va, sites
+
+
+def check_relocations(sites, relocs, off2va, base):
+    """Refuse any site whose code bytes overlap a fixup it does not also disable.
+
+    Wine never applies relocations to this exe, so an overlap is invisible in
+    testing there and only fails on Windows. That is how v4 shipped broken, so
+    it is checked here rather than remembered.
+    """
+    rva_of_word = {word_off: rva for rva, _, word_off in relocs}
+    disabled_by = {s.name: {rva_of_word[off] for off, _, _ in s.parts if off in rva_of_word}
+                   for s in sites}
+    disabled_any = set().union(*disabled_by.values())
+    # Judge by the stock type: an entry some site disables is HIGHLOW in a clean exe
+    # even if this file already has it patched to ABSOLUTE.
+    live = [rva for rva, typ, _ in relocs
+            if typ == IMAGE_REL_BASED_HIGHLOW or rva in disabled_any]
+    for s in sites:
+        for off, _, new in s.parts:
+            if off in rva_of_word:
+                continue                      # this part is the relocation edit itself
+            lo = off2va(off) - base
+            hi = lo + len(new)
+            for rva in live:
+                if rva < hi and rva + 4 > lo and rva not in disabled_by[s.name]:
+                    raise LookupError(
+                        "site %s writes over a live relocation at VA 0x%08X; it would "
+                        "be corrupted when Windows rebases the image" % (s.name, base + rva))
 
 
 def sha256(path):

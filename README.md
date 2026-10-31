@@ -71,12 +71,20 @@ does the branching, and clobbers nothing but flags.
 | `pad` | `cdc::PCXInputProducer::update` gate | `0x004B35B7` | `0x0B29B7` | `0F 85 1C 03 00 00` (`jne`) | `90 ×6` |
 | `looksrc` | look/aim source select | `0x007AD162` | `0x3AC562` | `80 3D … 00` (`cmp`) | `E8 rel32` + `90 90` |
 | `looksrc` | injected thunk | `0x00844234` | `0x443634` | `CC ×40` | 40-byte thunk |
+| `looksrc` | `.reloc` entry for the replaced `cmp` | — | `0xB03DBE` | `64 31` (`HIGHLOW`) | `64 01` (`ABSOLUTE`) |
 | `rumble` | `cdc::PCXInputProducer::setVibration` gate | `0x004B332A` | `0x0B272A` | `74 0B` (`je`) | `EB 0B` (`jmp`) |
 
 The thunk is position-independent: `call`/`pop` gets EIP, then an EIP-relative
 displacement reaches `g_inputSystems`. It needs no new base relocation and works
 with the ASLR the image asks for. Its code cave is verified unreferenced before
 use, and `--revert` restores it to `0xCC`.
+
+The `cmp` that the call replaces held an absolute address, and its relocation
+entry has to be disabled too. Windows rebases the exe and would otherwise add the
+ASLR slide to the middle of the call; Wine loads it at the preferred base and never
+applies relocations, so only Windows crashes. The patcher refuses any site that
+overlaps a live relocation, and `tools/rebase_check.py` simulates a Windows load
+(FINDINGS.md §5).
 
 `cdc::InputSystem::CombineInputs` already sums the states of all registered
 producers, and the two producers write to disjoint slots of the shared
@@ -113,6 +121,16 @@ python3 tools/patch_simultaneous_input.py --no-looksrc       <exe>
 python3 tools/patch_simultaneous_input.py --mousethresh      <exe>
 python3 tools/patch_simultaneous_input.py --padthresh        <exe>
 python3 tools/patch_simultaneous_input.py --no-rumble        <exe>
+```
+
+An exe patched by v4 crashes on Windows when loading a save, because v4 did not
+disable the relocation entry. It reads as partly patched, and patching it again
+completes it in place, producing the same bytes as a fresh install.
+
+To check that a patched exe survives being loaded the way Windows loads it:
+
+```sh
+python3 tools/rebase_check.py /path/to/stock/DXHRDC.exe /path/to/patched/DXHRDC.exe
 ```
 
 ---

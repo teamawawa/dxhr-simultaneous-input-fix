@@ -443,15 +443,35 @@ Four properties make this safe to drop into the middle of a live function:
   instruction on each path is what the caller's `je` sees. `add ecx, ecx` doubles
   as the zero test, and `add` on `-0.0` (`0x80000000`) yields `0`, so negative
   zero counts as no motion.
-* **Relocation.** The image sets `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`, so it
-  can be rebased, and any absolute address baked into new code would need a
-  `.reloc` entry. The `call`/`pop` gets EIP at runtime and the displacement to
-  `g_inputSystems` is a difference between two addresses in the same image, which
-  is invariant under rebasing. The patcher therefore does not touch the
-  relocation table.
+* **Relocation of the thunk.** The image sets
+  `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`, so it can be rebased, and any absolute
+  address baked into new code would need a `.reloc` entry. The `call`/`pop` gets
+  EIP at runtime and the displacement to `g_inputSystems` is a difference between
+  two addresses in the same image, which is invariant under rebasing, so the
+  thunk needs no entry of its own.
 * **Fallback.** If `g_inputSystems[0]` or its `currentState` is null during early
   start-up, both `test`s leave `ZF=1` and the caller takes the gamepad arm, which
   is the vanilla behaviour for `g_usingMouseKeyboard == 0`.
+
+**Relocation of the call site.** The `cmp` being replaced carries
+`g_usingMouseKeyboard` as an absolute operand, so `.reloc` has a `HIGHLOW` fixup
+for VA `0x007AD164`. That dword now sits across the middle of the `call`'s rel32
+and the first `nop`. Windows loads the exe at a randomised base and adds the
+slide to that dword, which sends the call into unmapped memory the first time the
+look update runs: the game reaches the main menu and crashes on loading a save.
+Wine loads the exe at its preferred base and applies no relocations, so the bug
+cannot be reproduced under Proton.
+
+`looksrc` therefore has a third part: the relocation entry's type goes from
+`HIGHLOW` (3) to `ABSOLUTE` (0), which the loader treats as padding and skips. It
+is a single byte at file offset `0xB03DBF`, and `--revert` restores it. Both
+patchers also refuse any site whose code bytes overlap a live fixup that the same
+site does not disable, and `tools/rebase_check.py` applies every live fixup with
+several slides and requires patched bytes to come through unchanged.
+
+| VA (of fixup) | entry word, file offset | stock | patched |
+|---|---|---|---|
+| `0x007AD164` | `0xB03DBE` | `64 31` (`HIGHLOW`, offset `0x164`) | `64 01` (`ABSOLUTE`) |
 
 `g_inputSystems` (`0x00E50980`) is recovered from the initialiser loop in
 `FUN_004AC590` rather than hardcoded:
