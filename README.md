@@ -73,6 +73,7 @@ does the branching, and clobbers nothing but flags.
 | `looksrc` | injected thunk | `0x00844234` | `0x443634` | `CC ×40` | 40-byte thunk |
 | `looksrc` | `.reloc` entry for the replaced `cmp` | — | `0xB03DBE` | `64 31` (`HIGHLOW`) | `64 01` (`ABSOLUTE`) |
 | `rumble` | `cdc::PCXInputProducer::setVibration` gate | `0x004B332A` | `0x0B272A` | `74 0B` (`je`) | `EB 0B` (`jmp`) |
+| `mousemotion` | raw-input mouse activity test | `0x004B2EC4` | `0x0B22C4` | `83 F9 05 0F 9E C0` (`cmp ecx,5; setle al`) | `B0 01 90 90 90 90` (`mov al,1`) |
 
 The thunk is position-independent: `call`/`pop` gets EIP, then an EIP-relative
 displacement reaches `g_inputSystems`. It needs no new base relocation and works
@@ -90,18 +91,26 @@ overlaps a live relocation, and `tools/rebase_check.py` simulates a Windows load
 producers, and the two producers write to disjoint slots of the shared
 `InputState`, so nothing else has to change.
 
+`mousemotion` changes what the device flag means for the UI. The flag still
+drives button prompts, the quick bar (the item row with 1–0 shortcuts), the menu
+cursor and aim-assist gating, but mouse motion no longer sets it: keys, mouse
+buttons and the wheel switch to keyboard/mouse mode, and pad input switches back.
+Aiming with a touchpad next to a pad then leaves the quick bar and prompts in
+gamepad mode. In menus, a click switches to pointer mode. FINDINGS.md §2b covers
+how the quick bar reads the flag.
+
 ### Optional sites
 
 All three are off by default.
 
 | name | change | effect |
 |---|------|--------|
-| `mousethresh` | mouse activity threshold `5` → `0` | widens the detector feeding `g_usingMouseKeyboard` |
+| `mousethresh` | mouse activity threshold `5` → `0` | widens the detector feeding `g_usingMouseKeyboard`; replaces `mousemotion` |
 | `padthresh` | thumbstick idle window `±0x3FFF` → `±0x1FFF` | same, for the pad |
 | `look` | NOP the look/aim `je` at `0x007AD169` | aiming always uses the mouse arm |
 
-The two threshold sites only affect the flag, which drives button prompts and
-aim-assist gating. Leaving them off keeps that behaviour stock.
+The threshold sites only affect the flag. `mousethresh` rewrites the same bytes
+as `mousemotion`, so selecting it turns `mousemotion` off.
 `--force-mouse-look` guarantees mouse aiming but disables right-stick look, stick
 acceleration and aim assist. It is the fallback if `looksrc` misbehaves.
 
@@ -121,11 +130,13 @@ python3 tools/patch_simultaneous_input.py --no-looksrc       <exe>
 python3 tools/patch_simultaneous_input.py --mousethresh      <exe>
 python3 tools/patch_simultaneous_input.py --padthresh        <exe>
 python3 tools/patch_simultaneous_input.py --no-rumble        <exe>
+python3 tools/patch_simultaneous_input.py --no-mousemotion   <exe>
 ```
 
-An exe patched by v4 crashes on Windows when loading a save, because v4 did not
-disable the relocation entry. It reads as partly patched, and patching it again
-completes it in place, producing the same bytes as a fresh install.
+An exe patched by an earlier version reads as partly patched, and patching it
+again completes it in place, producing the same bytes as a fresh install. A v4
+install crashes on Windows when loading a save, because v4 did not disable the
+relocation entry; v4.1 fixed that, and v4.2 adds `mousemotion`.
 
 To check that a patched exe survives being loaded the way Windows loads it:
 

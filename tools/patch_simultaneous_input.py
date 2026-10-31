@@ -60,13 +60,15 @@ Sites
   pad       NOP the `jne` in PCXInputProducer::update  -> pad always polled
   looksrc   look/aim picks its arm from the real mouse delta, per frame
   rumble    `je` -> `jmp` in setVibration              -> rumble always works
+  mousemotion  mouse motion no longer switches to keyboard/mouse mode, so the
+            quick bar, prompts and menu cursor follow the keyboard and the pad;
+            mouse buttons and the wheel still switch it
 
 Optional, off by default:
-  mousethresh  mouse activity threshold  5     -> 0
+  mousethresh  mouse activity threshold  5     -> 0  (replaces mousemotion)
   padthresh    pad thumbstick idle window 0x3FFF -> 0x1FFF
      Both only widen the coarse detectors feeding g_usingMouseKeyboard.  They do
-     not fix looking, and leaving them off keeps button prompts and aim-assist
-     gating at their shipped behaviour.
+     not fix looking.
 
   look         NOP the `je` in FUN_007AC8C0 -> aiming ALWAYS uses the mouse arm
      (--force-mouse-look).  Guarantees mouse aiming at the cost of right-stick
@@ -162,12 +164,21 @@ def find_one(data, pattern, what, start=0, end=None):
 
 
 class Site:
-    """One logical patch. `parts` is a list of (file_offset, vanilla, patched)."""
+    """One logical patch. `parts` is a list of (file_offset, vanilla, patched).
 
-    def __init__(self, name, parts, desc, default=True):
+    `rivals` names sites that rewrite the same bytes differently. Bytes matching a
+    rival's patched form count as vanilla for this site, and this site leaves
+    them alone when reverting, since they are the rival's to revert.
+    """
+
+    def __init__(self, name, parts, desc, default=True, rivals=()):
         self.name, self.parts, self.desc, self.default = name, parts, desc, default
+        self.rivals = list(rivals)          # Site objects, filled in after creation
 
-    def state(self, data):
+    def _rival_owns(self, data):
+        return any(r.state(data, _top=False) == "patched" for r in self.rivals)
+
+    def state(self, data, _top=True):
         """patched / vanilla, "partial" when every part is one or the other but they
         disagree, UNKNOWN when any part matches neither.
 
@@ -176,6 +187,8 @@ class Site:
         fixup. Patching completes it and reverting undoes it; only bytes we do not
         recognise are refused.
         """
+        if _top and self._rival_owns(data):
+            return "vanilla"
         seen = set()
         for off, orig, new in self.parts:
             cur = bytes(data[off:off + len(new)])
@@ -189,6 +202,8 @@ class Site:
         return "partial"
 
     def write(self, data, patched):
+        if not patched and self._rival_owns(data):
+            return
         for off, orig, new in self.parts:
             blob = new if patched else orig
             data[off:off + len(blob)] = blob
@@ -341,13 +356,28 @@ def locate_sites(data):
         "cdc::PCMouseKeyboard::update: NOP `je skip` (VA 0x%08X) -> "
         "mouse/keyboard state is always filled" % off2va(je_off)))
 
-    # --- 4. mouse activity threshold (feeds g_usingMouseKeyboard only)
-    mt_pat = (rb"\x03\xC8\x83\xF9[\x05\x00]\x0F\x9E\xC0\x84\xC2\x75."
-              rb"\xC6\x86\x91\x00\x00\x00\x01")
-    mt_off, _ = find_one(data, mt_pat, "mouse activity threshold", tstart, tend)
-    sites.append(Site("mousethresh", [(mt_off + 4, b"\x05", b"\x00")],
-                      "mouse activity threshold (VA 0x%08X): |dX|+|dY| > 5 -> != 0"
-                      % off2va(mt_off + 4), default=False))
+    # --- 4. mouse activity test (feeds g_usingMouseKeyboard only)
+    #        add ecx,eax / cmp ecx,5 / setle al / test dl,al / jne skip / mov [esi+91h],1
+    # Only the mouse branch of the raw-input handler runs these bytes; the keyboard
+    # branch reaches the latch with its own `jmp` to the final mov. dl is "no button
+    # or wheel event", al is "barely moved", and the latch is skipped when both hold.
+    # Two optional sites rewrite the cmp/setle pair, so they are rivals.
+    mt_pat = (rb"\x03\xC8(?:\x83\xF9[\x05\x00]\x0F\x9E\xC0|\xB0\x01\x90{4})"
+              rb"\x84\xC2\x75.\xC6\x86\x91\x00\x00\x00\x01")
+    mt_off, _ = find_one(data, mt_pat, "mouse activity test", tstart, tend)
+    mt_stock = b"\x83\xF9\x05\x0F\x9E\xC0"
+    thresh = Site("mousethresh", [(mt_off + 2, mt_stock, b"\x83\xF9\x00\x0F\x9E\xC0")],
+                  "mouse activity threshold (VA 0x%08X): |dX|+|dY| > 5 -> != 0"
+                  % off2va(mt_off + 2), default=False)
+    # `mov al, 1` makes "barely moved" always true, so the latch is set only by a
+    # button or wheel event. Mouse motion then never flips the device flag, and the
+    # quick bar, prompts and menu cursor follow the keyboard and the pad alone.
+    motion = Site("mousemotion", [(mt_off + 2, mt_stock, b"\xB0\x01\x90\x90\x90\x90")],
+                  "mouse activity test (VA 0x%08X): mouse motion no longer marks the "
+                  "mouse/keyboard as active; buttons and wheel still do"
+                  % off2va(mt_off + 2))
+    thresh.rivals, motion.rivals = [motion], [thresh]
+    sites += [thresh, motion]
 
     # --- 5. pad thumbstick idle window (feeds g_usingMouseKeyboard only)
     pt_off = act_off + 0x23
@@ -473,8 +503,12 @@ def main():
                          "assist, and implies --no-looksrc.")
     ap.add_argument("--no-looksrc", action="store_true",
                     help="do not inject the look-source thunk")
+    ap.add_argument("--no-mousemotion", action="store_true",
+                    help="let mouse motion switch the game to keyboard/mouse mode, as "
+                         "stock; the quick bar then shows whenever the mouse moves")
     ap.add_argument("--mousethresh", action="store_true",
-                    help="also drop the mouse activity threshold from 5 to 0")
+                    help="drop the mouse activity threshold from 5 to 0. Rewrites the "
+                         "same bytes as mousemotion, so it implies --no-mousemotion.")
     ap.add_argument("--padthresh", action="store_true",
                     help="also narrow the thumbstick idle window to +/-0x1FFF")
     ap.add_argument("--no-rumble", action="store_true",
@@ -499,8 +533,10 @@ def main():
         want["look"], want["looksrc"] = True, False
     if args.no_looksrc:
         want["looksrc"] = False
+    if args.no_mousemotion:
+        want["mousemotion"] = False
     if args.mousethresh:
-        want["mousethresh"] = True
+        want["mousethresh"], want["mousemotion"] = True, False
     if args.padthresh:
         want["padthresh"] = True
     if args.no_rumble:

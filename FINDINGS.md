@@ -178,6 +178,34 @@ Both sites are off by default. They make the flag more responsive but do not fix
 looking (§3d), and leaving them alone keeps button prompts and aim-assist gating
 at their shipped behaviour.
 
+The keyboard branch of the same handler reaches the latch through its own
+`jmp 0x4B2ECE`, skipping the test above, so `0x004B2EC4..0x004B2ECD` only ever
+runs for mouse input. The `mousemotion` site replaces `cmp ecx, 5; setle al`
+with `mov al, 1`: "barely moved" is then always true and the latch is set only by
+a button or wheel event. Mouse motion stops flipping the flag, while keys still
+set it and pad input still clears it. It is part of the default set, and
+`mousethresh` rewrites the same bytes, so selecting that turns it off.
+
+In menus that run in pad mode, the mouse stays inert until a click, which sets
+the latch and switches the menu to pointer mode.
+
+### 2b. Quick bar visibility
+
+The item row (`NsQuickBarMovieController`) is shown or put into auto-hide by its
+ActionScript, which lives in the game data rather than the exe. The exe's input is
+the device flag. Every frame, `FUN_0072D1F0` compares each Scaleform movie's
+cached copy of the flag (`movie+0x3A`) with `g_usingMouseKeyboard`. When they
+differ it sets `_global.isPCMouseKeyboard` in that movie and calls its
+`IScaleformInterface_onControllerStatusChanged`. At load, `FUN_007FE2A0` also
+calls `InitAutoHide(g_usingMouseKeyboard == 0 || g_quickBarAutoHide)`, where
+`g_quickBarAutoHide` is a `GameOption<bool>` stored at `0x01C79EB8`.
+
+The same per-movie broadcast feeds every UI movie, and `FUN_0081A130` shows the
+menu cursor from the same flag. Anything that changes when the flag flips
+(prompts, quick bar, menu pointer mode) therefore moves together; targeting the
+quick bar alone would need a second flag and a per-movie override inside
+`FUN_0072D1F0`.
+
 ---
 
 ## 3. Flag consumers
