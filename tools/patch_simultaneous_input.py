@@ -5,8 +5,13 @@ DXHR / DXHR:DC  --  "simultaneous keyboard+mouse and gamepad input" patch.
 Vanilla behaviour
 -----------------
 The engine keeps a single global byte  g_usingMouseKeyboard  (0x00B23E54 in the
-Director's Cut Steam/GOG build).  An arbitration function (FUN_004B0360) sets it
-to 1 when the mouse/keyboard reports activity and to 0 when an XInput pad does.
+Director's Cut Steam/GOG build, 0x00B09E40 in the original release).  An
+arbitration function (FUN_004B0360 in the DC) sets it to 1 when the
+mouse/keyboard reports activity and to 0 when an XInput pad does.
+
+Addresses below are the Director's Cut's.  Both builds are supported: struct
+offsets are read from the exe, and the few places where the code itself differs
+have a signature per build.  FINDINGS-non-directors-cut.md lists the differences.
 
 Both input producers *gate their entire state-filling code* on that byte:
 
@@ -216,8 +221,11 @@ class Site:
 # --------------------------------------------------------------------------- #
 # the injected look-source thunk
 # --------------------------------------------------------------------------- #
-def build_look_thunk(cave_va, g_inputsystems_va):
-    """
+def build_look_thunk(cave_va, g_inputsystems_va, dx_off=0x58, dy_off=0x5C):
+    """deltaX/deltaY sit at +0x58/+0x5C in the Director's Cut and +0x54/+0x58 in the
+    original, whose InputState has one fewer key; the caller passes the offsets
+    read from InputState::reset in the exe being patched.
+
         push eax
         call .L1
     .L1:pop  eax                  ; eax = VA(.L1); no relocation needed
@@ -228,10 +236,10 @@ def build_look_thunk(cave_va, g_inputsystems_va):
         test eax, eax
         jz   .out
         push ecx
-        mov  ecx, [eax + 0x58]    ; InputState::deltaX  (float bits)
+        mov  ecx, [eax + dx_off]  ; InputState::deltaX  (float bits)
         add  ecx, ecx             ; shift out the sign bit; ZF=1 iff +/-0.0
         jnz  .pop2
-        mov  ecx, [eax + 0x5C]    ; InputState::deltaY
+        mov  ecx, [eax + dy_off]  ; InputState::deltaY
         add  ecx, ecx
     .pop2:
         pop  ecx                  ; pop/ret do not touch flags
@@ -250,10 +258,10 @@ def build_look_thunk(cave_va, g_inputsystems_va):
             b"\x85\xC0"
             b"\x74\x0E"
             b"\x51"
-            b"\x8B\x48\x58"
+            b"\x8B\x48" + bytes([dx_off]) +
             b"\x03\xC9"
             b"\x75\x05"
-            b"\x8B\x48\x5C"
+            b"\x8B\x48" + bytes([dy_off]) +
             b"\x03\xC9"
             b"\x59"
             b"\x58"
@@ -305,17 +313,49 @@ def find_cave(data, va2off, off2va, text, look_call_off):
 
 
 # --------------------------------------------------------------------------- #
+def detect_layout(data, tstart, tend):
+    """Read the InputState layout out of InputState::reset, and name the build.
+
+        push esi / push <keys> / mov esi,ecx / push 0 / push esi / call memset /
+        fldz / fst [esi+<wheel>] / add esp,0xC / fst [esi+<dY>] / fstp [esi+<dX>]
+
+    The Director's Cut has 0x55 key slots and the deltas at +0x58/+0x5C; the
+    original has 0x54 and +0x54/+0x58, because the DC added one input. The two
+    builds also differ in code the offsets cannot describe, keyed off the same
+    fact: the mouse activity threshold (5 vs 30) and the shape of the look gate.
+    """
+    off, m = find_one(data, rb"\x56\x6A(.)\x8B\xF1\x6A\x00\x56\xE8....\xD9\xEE\xD9\x56(.)"
+                            rb"\x83\xC4\x0C\xD9\x56(.)\xD9\x5E(.)\x5E\xC3",
+                      "InputState::reset", tstart, tend)
+    keys, wheel, dy, dx = (m.group(i)[0] for i in (1, 2, 3, 4))
+    if not (dy == dx + 4 and wheel == dx + 8):
+        raise LookupError("InputState::reset has an unexpected float layout")
+    known = {0x55: ("Director's Cut", 0x05), 0x54: ("original", 0x1E)}
+    if keys not in known:
+        raise LookupError("unknown InputState layout (%d key slots)" % keys)
+    name, mouse_threshold = known[keys]
+    return {"name": name, "dx": dx, "dy": dy, "mouse_threshold": mouse_threshold}
+
+
 def locate_sites(data):
     base, va2off, off2va, text = make_maps(data)
     tstart, tend = text[3], text[3] + text[4]
     relocs = base_relocs(data)
+    layout = detect_layout(data, tstart, tend)
     sites = []
 
     # --- 1. the XInput "activity only" block inside PCXInputProducer::update
-    act_pat = (rb"\x66\x83\xBE\x94\x00\x00\x00\x00\x75."
-               rb"\x80\xBE\x96\x00\x00\x00\x00\x77."
-               rb"\x80\xBE\x97\x00\x00\x00\x00\x77.")
-    act_off, _ = find_one(data, act_pat, "PCXInputProducer activity block", tstart, tend)
+    #        cmp word [esi+B],0 / jne ; cmp byte [esi+B+2],0 / ja ; cmp byte [esi+B+3],0 / ja
+    # B is XINPUT_STATE.wButtons: 0x94 in the Director's Cut, 0x90 in the original.
+    act_pat = (rb"\x66\x83\xBE(.)\x00\x00\x00\x00\x75."
+               rb"\x80\xBE(.)\x00\x00\x00\x00\x77."
+               rb"\x80\xBE(.)\x00\x00\x00\x00\x77.")
+    hits = [m for m in re.finditer(act_pat, bytes(data[tstart:tend]), re.DOTALL)
+            if m.group(2)[0] == m.group(1)[0] + 2 and m.group(3)[0] == m.group(1)[0] + 3]
+    if len(hits) != 1:
+        raise LookupError("expected exactly 1 match for PCXInputProducer activity block, "
+                          "found %d" % len(hits))
+    act_off = hits[0].start() + tstart
     act_va = off2va(act_off)
 
     # --- 2. the `jne act_va` that skips the pad state fill, and the cmp before it
@@ -342,9 +382,10 @@ def locate_sites(data):
         "cdc::PCXInputProducer::update: NOP `jne activity_only` (VA 0x%08X) -> "
         "gamepad state is always filled" % off2va(pad_off + 7)))
 
-    # --- 3. PCMouseKeyboard::update gate
-    kbm_pat = (rb"\x80\xBB\x90\x00\x00\x00\x00\x0F\x84...."
-               rb"\x80\xBB\x86\x00\x00\x00\x00\x0F\x84...."
+    # --- 3. PCMouseKeyboard::update gate: the third of three guards
+    #        cmp [ebx+init],0 / je ; cmp [ebx+cursorGrab],0 / je ; cmp [flag],0 / je
+    kbm_pat = (rb"\x80\xBB.\x00\x00\x00\x00\x0F\x84...."
+               rb"\x80\xBB.\x00\x00\x00\x00\x0F\x84...."
                rb"\x80\x3D" + flagb + rb"\x00(?:\x0F\x84....|\x90{6})")
     kbm_off, _ = find_one(data, kbm_pat, "PCMouseKeyboard::update gate", tstart, tend)
     je_off = kbm_off + 33
@@ -357,22 +398,27 @@ def locate_sites(data):
         "mouse/keyboard state is always filled" % off2va(je_off)))
 
     # --- 4. mouse activity test (feeds g_usingMouseKeyboard only)
-    #        add ecx,eax / cmp ecx,5 / setle al / test dl,al / jne skip / mov [esi+91h],1
+    #        add ecx,eax / cmp ecx,T / setle r8 / test dl,r8 / jne skip / mov [esi+L],1
     # Only the mouse branch of the raw-input handler runs these bytes; the keyboard
     # branch reaches the latch with its own `jmp` to the final mov. dl is "no button
-    # or wheel event", al is "barely moved", and the latch is skipped when both hold.
-    # Two optional sites rewrite the cmp/setle pair, so they are rivals.
-    mt_pat = (rb"\x03\xC8(?:\x83\xF9[\x05\x00]\x0F\x9E\xC0|\xB0\x01\x90{4})"
-              rb"\x84\xC2\x75.\xC6\x86\x91\x00\x00\x00\x01")
-    mt_off, _ = find_one(data, mt_pat, "mouse activity test", tstart, tend)
-    mt_stock = b"\x83\xF9\x05\x0F\x9E\xC0"
-    thresh = Site("mousethresh", [(mt_off + 2, mt_stock, b"\x83\xF9\x00\x0F\x9E\xC0")],
-                  "mouse activity threshold (VA 0x%08X): |dX|+|dY| > 5 -> != 0"
-                  % off2va(mt_off + 2), default=False)
-    # `mov al, 1` makes "barely moved" always true, so the latch is set only by a
+    # or wheel event", r8 is "barely moved", and the latch is skipped when both hold.
+    # The Director's Cut uses al and T=5, the original cl and T=30. Two sites
+    # rewrite the cmp/setle pair, so they are rivals.
+    mt_pat = (rb"\x03\xC8(?:\x83\xF9[\x00-\x7F]\x0F\x9E[\xC0\xC1]|[\xB0\xB1]\x01\x90{4})"
+              rb"\x84([\xC2\xCA])\x75.\xC6\x86.\x00\x00\x00\x01")
+    mt_off, mt_m = find_one(data, mt_pat, "mouse activity test", tstart, tend)
+    reg = 1 if mt_m.group(1) == b"\xCA" else 0          # al = 0, cl = 1
+    thr = layout["mouse_threshold"]
+    mt_stock = bytes([0x83, 0xF9, thr, 0x0F, 0x9E, 0xC0 + reg])
+    thresh = Site("mousethresh",
+                  [(mt_off + 2, mt_stock, bytes([0x83, 0xF9, 0x00, 0x0F, 0x9E, 0xC0 + reg]))],
+                  "mouse activity threshold (VA 0x%08X): |dX|+|dY| > %d -> != 0"
+                  % (off2va(mt_off + 2), thr), default=False)
+    # `mov r8, 1` makes "barely moved" always true, so the latch is set only by a
     # button or wheel event. Mouse motion then never flips the device flag, and the
     # quick bar, prompts and menu cursor follow the keyboard and the pad alone.
-    motion = Site("mousemotion", [(mt_off + 2, mt_stock, b"\xB0\x01\x90\x90\x90\x90")],
+    motion = Site("mousemotion",
+                  [(mt_off + 2, mt_stock, bytes([0xB0 + reg, 0x01, 0x90, 0x90, 0x90, 0x90]))],
                   "mouse activity test (VA 0x%08X): mouse motion no longer marks the "
                   "mouse/keyboard as active; buttons and wheel still do"
                   % off2va(mt_off + 2))
@@ -380,9 +426,11 @@ def locate_sites(data):
     sites += [thresh, motion]
 
     # --- 5. pad thumbstick idle window (feeds g_usingMouseKeyboard only)
+    #        mov r1, -0x3FFF / cmp ax, r1w / jl / mov r2, +0x3FFF
+    # The Director's Cut loads the window into edx/ecx, the original into ecx/edx.
     pt_off = act_off + 0x23
     cur = bytes(data[pt_off:pt_off + 15])
-    if not (len(cur) == 15 and cur[0] == 0xBA and cur[10] == 0xB9):
+    if not (len(cur) == 15 and {cur[0], cur[10]} == {0xB9, 0xBA}):
         raise LookupError("pad activity threshold not where expected")
 
     def _window(half):
@@ -392,15 +440,40 @@ def locate_sites(data):
                       "pad activity threshold (VA 0x%08X): thumbstick idle window "
                       "+/-0x3FFF -> +/-0x1FFF" % off2va(pt_off), default=False))
 
-    # --- 6. the look/aim device gate in FUN_007AC8C0
-    look_pat = (rb"(?:\x80\x3D" + flagb + rb"\x00|\xE8....\x90\x90)"
-                rb"(?:\x0F\x84....|\x90{6})\x80\x7C\x24\x40\x00\x0F\x85....")
-    look_off, _ = find_one(data, look_pat, "look/aim device gate", tstart, tend)
+    # --- 6. the look/aim device gate
+    # Director's Cut (FUN_007AC8C0): cmp [flag],0 / je pad_arm / cmp [esp+40h],0 /
+    #   jne pad_arm, with the mouse arm inline; the second test is SmartGlass.
+    # Original (FUN_0079D?): cmp [flag],0 / jne mouse_arm, with the mouse arm out of
+    #   line and the pad arm falling through: fld [esp+X] / push ecx / fstp [esp] /
+    #   push ebx / lea r,[esp+Y] / push r / mov ecx,esi / call aim_assist.
+    # The thunk leaves ZF=0 exactly when the mouse moved, which takes the mouse arm
+    # under both shapes: the DC's je falls through to it, the original's jne jumps.
+    gate = rb"(?:\x80\x3D" + flagb + rb"\x00|\xE8....\x90\x90)"
+    dc_pat = gate + rb"(?:\x0F\x84....|\x90{6})\x80\x7C\x24\x40\x00\x0F\x85...."
+    orig_pat = (gate + rb"(?:\x0F\x85....|\x90\xE9....)"
+                rb"\xD9\x44\x24.\x51\xD9\x1C\x24\x53\x8D[\x8C\x94]\x24....[\x51\x52]\x8B\xCE\xE8")
+    shapes = [(m.start() + tstart, "dc") for m in
+              re.finditer(dc_pat, bytes(data[tstart:tend]), re.DOTALL)]
+    shapes += [(m.start() + tstart, "orig") for m in
+               re.finditer(orig_pat, bytes(data[tstart:tend]), re.DOTALL)]
+    if len(shapes) != 1:
+        raise LookupError("expected exactly 1 look/aim device gate, found %d" % len(shapes))
+    look_off, shape = shapes[0]
     cmp_orig = b"\x80\x3D" + struct.pack("<I", flag_va) + b"\x00"
-    je_off = look_off + 7
-    sg_rel = struct.unpack_from("<i", data, look_off + 20)[0]
-    pad_arm_va = off2va(look_off + 18) + 6 + sg_rel
-    je_orig = b"\x0F\x84" + struct.pack("<i", pad_arm_va - (off2va(je_off) + 6))
+    br_off = look_off + 7
+    if shape == "dc":
+        # optional `look` site: NOP the je so the mouse arm always runs
+        sg_rel = struct.unpack_from("<i", data, look_off + 20)[0]
+        pad_arm_va = off2va(look_off + 18) + 6 + sg_rel
+        look_parts = [(br_off,
+                       b"\x0F\x84" + struct.pack("<i", pad_arm_va - (off2va(br_off) + 6)),
+                       b"\x90" * 6)]
+        look_desc = "NOP `je gamepad_aim_path`"
+    else:
+        # optional `look` site: jne -> nop + jmp to the same target
+        rel = data[br_off + 2:br_off + 6]
+        look_parts = [(br_off, b"\x0F\x85" + rel, b"\x90\xE9" + rel)]
+        look_desc = "`jne mouse_aim_path` -> `jmp`"
 
     # g_inputSystems: `xor eax,eax / mov [esi*4 + g_inputSystems], eax / inc esi / cmp esi,4`
     gis_off, gis_m = find_one(
@@ -409,7 +482,7 @@ def locate_sites(data):
     gis_va = struct.unpack("<I", gis_m.group(1))[0]
 
     cave_va, cave_off = find_cave(data, va2off, off2va, text, look_off)
-    thunk = build_look_thunk(cave_va, gis_va)
+    thunk = build_look_thunk(cave_va, gis_va, layout["dx"], layout["dy"])
     assert len(thunk) == THUNK_LEN
     call = b"\xE8" + struct.pack("<i", cave_va - (off2va(look_off) + 5)) + b"\x90\x90"
 
@@ -436,10 +509,10 @@ def locate_sites(data):
         "mouse delta is non-zero, else the gamepad arm (thunk at VA 0x%08X, "
         "g_inputSystems = 0x%08X)" % (off2va(look_off), cave_va, gis_va)))
 
-    sites.append(Site("look", [(je_off, je_orig, b"\x90" * 6)],
-                      "look/aim update: NOP `je gamepad_aim_path` (VA 0x%08X) -> "
-                      "aiming ALWAYS uses the mouse arm; kills right-stick look "
-                      "and aim assist" % off2va(je_off), default=False))
+    sites.append(Site("look", look_parts,
+                      "look/aim update: %s (VA 0x%08X) -> aiming ALWAYS uses the mouse "
+                      "arm; kills right-stick look and aim assist"
+                      % (look_desc, off2va(br_off)), default=False))
 
     # --- 7. PCXInputProducer::setVibration gate
     vib_pat = (rb"\x83\xEC\x0C\x80\x3D" + flagb +
@@ -451,7 +524,7 @@ def locate_sites(data):
                       % off2va(vib_off + 10)))
 
     check_relocations(sites, relocs, off2va, base)
-    return flag_va, sites
+    return flag_va, sites, layout
 
 
 def check_relocations(sites, relocs, off2va, base):
@@ -520,7 +593,7 @@ def main():
         data = bytearray(f.read())
 
     try:
-        flag_va, sites = locate_sites(data)
+        flag_va, sites, layout = locate_sites(data)
     except LookupError as e:
         print("ERROR: could not locate the input gates: %s" % e, file=sys.stderr)
         print("       (is this really a Deus Ex: HR / HR:DC executable?)", file=sys.stderr)
@@ -544,7 +617,7 @@ def main():
     if args.revert:
         want = {k: False for k in want}
 
-    print("g_usingMouseKeyboard = 0x%08X\n" % flag_va)
+    print("build: %s   g_usingMouseKeyboard = 0x%08X\n" % (layout["name"], flag_va))
 
     todo, broken = [], False
     for s in sites:

@@ -1,11 +1,16 @@
 # Reverse-engineering notes
 
-Target: `DXHRDC.exe`, Deus Ex: Human Revolution — Director's Cut, Steam build.
-PE32, `ImageBase = 0x00400000`, 7 sections. `.text` is VA `0x00401000`, raw offset
-`0x400`, so **file offset = VA − 0x400C00**.
+Target: `DXHRDC.exe`, Deus Ex: Human Revolution — Director's Cut, Steam app
+238010, build 235963: game version 2.0.0.0, file version resource 2.0.66.0, the
+latest on Steam. PE32, `ImageBase = 0x00400000`, 7 sections. `.text` is VA
+`0x00401000`, raw offset `0x400`, so **file offset = VA − 0x400C00**.
 
-SHA-256 of the exe as analysed, already DXHR-Patcher-patched:
-`70c24671c9136743cac611958ae0c8e37e95fdc8f97b68daea962f33bf2b7cd0`
+SHA-256 of the stock exe: `8266b6b4a5bf25f2f4e8de068aa3720f6289c962bb1c2bb70a7b1c111ba510a1`.
+The exe analysed had already been through the DXHR Patcher:
+`70c24671c9136743cac611958ae0c8e37e95fdc8f97b68daea962f33bf2b7cd0`.
+
+The original release, 1.4.651.0, is covered in
+[FINDINGS-non-directors-cut.md](FINDINGS-non-directors-cut.md).
 
 Reference material:
 

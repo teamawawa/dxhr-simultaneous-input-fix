@@ -1,14 +1,23 @@
-# DXHR:DC — simultaneous keyboard/mouse + gamepad input patch
+# DXHR / DXHR:DC — simultaneous keyboard/mouse + gamepad input patch
 
-**Deus Ex: Human Revolution — Director's Cut** (PC, Steam build) accepts one
-input device at a time. Touch the mouse and the gamepad stops responding; use the
+**Deus Ex: Human Revolution — Director's Cut** and the original **Deus Ex: Human
+Revolution** (PC, Steam builds) accept one input device at a time. Touch the mouse and the gamepad stops responding; use the
 gamepad and the mouse stops. This patch removes that.
 
 Both devices stay live, and aiming follows whichever one you are actually moving,
 decided per frame. It was built for aiming with a Steam Controller touchpad
 mapped to Mouse while the sticks and buttons handle everything else. Right-stick
 look, stick acceleration and aim assist all still work. Confirmed working
-in-game.
+in-game on both games.
+
+| game | Steam app | version | exe |
+|---|---|---|---|
+| Deus Ex: Human Revolution — Director's Cut | 238010 | 2.0.0.0 | `DXHRDC.exe` |
+| Deus Ex: Human Revolution | 28050 | 1.4.651.0 | `dxhr.exe` |
+
+Both are the latest Steam builds. Tested on Linux with cachyos-proton and on
+Windows 10 Enterprise LTSC 2021, with the Steam Controller (2026); the original
+release only on Linux so far.
 
 Claude was used heavily in reverse engineering and developing the patch,
 though the decomp by rrika helped a bunch. The whole process didn't take very long:
@@ -36,6 +45,11 @@ same description is also visible there.
 ---
 
 ## Mechanism
+
+Addresses in this section are the Director's Cut's. The original release has the
+same input code with different struct offsets and addresses, and three spots
+compiled differently; [FINDINGS-non-directors-cut.md](FINDINGS-non-directors-cut.md)
+covers them and lists its sites.
 
 The engine keeps one global byte, `g_usingMouseKeyboard` (`0x00B23E54`),
 re-arbitrated every frame: mouse/keyboard activity sets it to 1, gamepad activity
@@ -114,12 +128,15 @@ as `mousemotion`, so selecting it turns `mousemotion` off.
 `--force-mouse-look` guarantees mouse aiming but disables right-stick look, stick
 acceleration and aim assist. It is the fallback if `looksrc` misbehaves.
 
-[FINDINGS.md](FINDINGS.md) has the full reverse-engineering write-up.
+[FINDINGS.md](FINDINGS.md) has the full reverse-engineering write-up, and
+[FINDINGS-non-directors-cut.md](FINDINGS-non-directors-cut.md) how the original
+release differs.
 
 ## Manual patching with python script
 
 ```sh
-python3 tools/patch_simultaneous_input.py "/path/to/DXHRDC.exe"
+python3 tools/patch_simultaneous_input.py "/path/to/DXHRDC.exe"     # Director's Cut
+python3 tools/patch_simultaneous_input.py "/path/to/dxhr.exe"       # original release
 
 python3 tools/patch_simultaneous_input.py --check  <exe>    # report status, write nothing
 python3 tools/patch_simultaneous_input.py --revert <exe>    # undo everything
@@ -136,7 +153,12 @@ python3 tools/patch_simultaneous_input.py --no-mousemotion   <exe>
 An exe patched by an earlier version reads as partly patched, and patching it
 again completes it in place, producing the same bytes as a fresh install. A v4
 install crashes on Windows when loading a save, because v4 did not disable the
-relocation entry; v4.1 fixed that, and v4.2 adds `mousemotion`.
+relocation entry; v4.1 fixed that, v4.2 adds `mousemotion`, and v4.3 adds the
+original release.
+
+The script identifies the game from the exe itself and prints which one it
+found. Struct offsets are read out of `InputState::reset` rather than assumed,
+so the injected thunk reads the right fields in either game.
 
 To check that a patched exe survives being loaded the way Windows loads it:
 
